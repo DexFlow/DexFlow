@@ -1,0 +1,110 @@
+pragma solidity ^0.8.17;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "./interfaces/IUniswapV2Factory.sol";
+import "./interfaces/IUniswapV2Router02.sol";
+
+contract DexFlow is ERC20, Ownable {
+
+    uint256 private initialSupply = 50_000_000_000 * (10 ** 18);
+
+    uint256 public constant taxLimit = 10;
+    uint256 public sellTax = 10;
+
+    uint256 private includedSellTax;
+    uint256 private includedBuyTax;
+
+    mapping(bool => mapping(address => bool)) public excludedList;
+
+    address public tokenPairAddr;
+    address public appAddr;
+    address public taxFundAddr;
+
+    IUniswapV2Router02 public uniswapV2Router;
+    address public uniswapV2Pair;
+
+    constructor(
+        address _routerAddr,
+        address _taxFundAddr
+    ) ERC20("DexFlow", "DEXFLOW")
+    {
+        require(
+            _routerAddr != address(0) && _taxFundAddr != address(0),
+            "Router and Tax Fund address cannot be empty"
+        );
+        excludedList[true][msg.sender] = true;
+        excludedList[true][address(this)] = true;
+        excludedList[true][_routerAddr] = true;
+        excludedList[true][_taxFundAddr] = true;
+        taxFundAddr = _taxFundAddr;
+
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(_routerAddr);
+        address _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
+        uniswapV2Router = _uniswapV2Router;
+        uniswapV2Pair = _uniswapV2Pair;
+
+        _mint(msg.sender, initialSupply);
+    }
+
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal override virtual {
+
+        uint256 baseUnit = amount / 100;
+        uint256 tax = 0;
+
+        if (
+            (excludedList[false][sender] && !excludedList[true][sender]) ||
+            (excludedList[false][recipient] && !excludedList[true][recipient])
+        ) {
+            if (sender == uniswapV2Pair) {
+                tax = baseUnit * includedBuyTax;
+            } else {
+                tax = baseUnit * includedSellTax;
+            }
+        } else if (recipient == uniswapV2Pair && !(excludedList[true][sender] || excludedList[true][recipient])) {
+            tax = baseUnit * sellTax;
+        }
+
+        if (tax > 0) {
+            super._transfer(sender, taxFundAddr, tax);
+        }
+
+        amount -= tax;
+
+        super._transfer(sender, recipient, amount);
+    }
+
+    function setAllTaxes(uint256 _tax, uint256 _buyTax, uint256 _sellTax) public onlyOwner {
+        require(_tax <= taxLimit, "ERC20: tax value higher than tax limit");
+        require(_buyTax <= 10 && _sellTax <= 10, "ERC20: included tax cant be higher than 10");
+        sellTax = _tax;
+        includedBuyTax = _buyTax;
+        includedSellTax = _sellTax;
+    }
+
+    function setTaxFundAddr(address _addr) external onlyOwner {
+        taxFundAddr = _addr;
+    }
+
+    function excludeFrom(address[] memory _addrs, bool excludeType) public onlyOwner {
+        for (uint256 i = 0; i < _addrs.length; i++) {
+            if (!excludedList[excludeType][_addrs[i]]) {
+                excludedList[excludeType][_addrs[i]] = true;
+            }
+        }
+    }
+
+    function removeExcluded(address[] memory _addrs, bool excludeType) public onlyOwner {
+        for (uint256 i = 0; i < _addrs.length; i++) {
+            if (excludedList[excludeType][_addrs[i]]) {
+                excludedList[excludeType][_addrs[i]] = false;
+            }
+        }
+    }
+
+    receive() external payable {}
+}
